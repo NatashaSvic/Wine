@@ -1,0 +1,689 @@
+---
+title: "O-1-8 FINAL PROJECT Wine Reviews"
+author: Sean Ariel, Javier Galvis Moreno, Ludwig Orsini-Rosenberg, Annie Pi,  Daniel Saggese, Natasha Savic, Nika Tamaio Flores   
+date: "12/11/2017"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+Please find the links to the individual project members below:
+[Annie Pi](https://www.linkedin.com/in/anniepi/)
+[Nika Tamaio Flores](https://www.kaggle.com/sazerland)
+[Ludwig Orsini-Rosenberg](https://www.linkedin.com/in/ludwig-orsini-rosenberg-15621763/)
+[Daniel Saggese](https://www.linkedin.com/in/daniel-saggese-71a422b2/)
+[Javier Galvis Moreno](https://www.linkedin.com/in/javiergalvis/)
+[Sean Ariel](https://www.linkedin.com/in/sean-ariel-646b9969/)
+[Natasha Savic](https://www.linkedin.com/in/natasha-savic/)
+
+## 1. INTRODUCTION
+We are 7 students at IE University pursuing a Masters in Big Data and Business Analytics. We created this analysis as our final project for a course on statistical programming in R. As wine enthusiasts, we chose to analyze a Kaggle dataset on wine, consisting of 129,971 observations scraped from [WineEnthusiast](http://www.wineenthusiast.com) in the end of November 2017. we wanted to share some interesting facts on this dataset, and we hope you enjoy what we found.   
+
+## 2. LOAD LIBRARIES AND DATA
+First, we uploaded necessary libraries and the dataset. 
+```{r libraries, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(effects)
+library(stringr)
+library(tidyr)
+library(httr)
+library(jsonlite)
+library(lubridate)
+library(tm)
+library(SnowballC)
+library(wordcloud)
+library(car)
+wine <- read.csv("winemag-data-130k-v2.csv")
+```
+
+## 3. DATA UNDERSTANDING
+```{r exploration}
+glimpse(wine)
+```
+
+Using glimpse, we see there are 14 variables in the dataset:
+
+ * __X__ indicates the number of the row.
+ * __Title__ stands for review name and may contain important peace of information such as vintage.
+ * __Variety__ is a type of grapes the wine is from.
+ * __Points__ stands for WineEnthusiast's ratings and measures from 1 to 100.
+ * __Description__ is a sommelier's review for a particular bottle.
+ * __Country__ shows wine origin.
+ * __Province__ stands for particular wine state of the country. 
+ * __Region_1__ is wine growing area in province.
+ * __Region_2__ clarifies specific regions.
+ * __Winery__ allocates where the wine was made.
+ * __Designation__ shows from which particular vineyard the grapes wine made of are from.
+ * __Price__ shows the cost for a bottle in US dollars.
+ * __Taster_name__ shows the name of sommelier who tried the wine and wrote the review.
+ * __Taster_twitter_handle__ allows to identify sommelier on Twitter.
+
+## 4. CLEANING DATA
+Before beginning our analysis, we wanted to make sure we working with clean data with no duplicate values. Among the variables in the dataset, the one that seems best to find duplicates is "Description" as it consists of free text -- that is, each taster writes a description using natural language, and therefore, it would be very odd if two reviewers entered the exact same text.
+
+By looking into "Description", we find that it is a factor with 119,955 levels, which is 10,016 less than the number of total records within the dataset. This shows us that there are some repeated values.
+```{r check duplicates}
+wine$description %>% 
+  glimpse()
+```
+
+The next step is to make sure we won't be deleting empty descriptions that might be mistakenly counted as duplicates. 
+```{r check empty descr, echo=FALSE}
+cat("Empty spaces: ", sum(wine$description == ""))
+cat("NAs: ", sum(is.na(wine$description)))
+```
+
+We find that there are no empty values. Now we can proceed to get rid of the duplicates. We use a column named duplicate in order to tag those rows to delete, and drop the column once we are done.
+```{r delete duplicate}
+wine <- wine %>% 
+  mutate(duplicate = duplicated(description)) %>% 
+  filter(duplicate==FALSE) %>% 
+  select(-duplicate) 
+
+glimpse(wine)
+```
+After getting rid of the duplicate values, we see that our dataset is now of 119,955 records. Now we can move on into the rest of the variables.
+
+## 5. DATA EXPLORATION 
+
+### 5.1 Country Exploration
+The first thing we notice is that there is information about wines from different countries. We would like to know which countries are present and how are the reviews distributed. 
+
+Again, we begin by checking for NA's and empty values.
+```{r check empty country, echo=FALSE}
+cat("Empty spaces: ", sum(wine$country == ""))
+cat("NAs: ", sum(is.na(wine$country)))
+
+sum(wine$country == "")/dim(wine)[1]
+```
+As we find that 63 values are missing from 'Country', we consider that it would be possible to find at least some of them by cross-referencing with those records from the same winery that do have their countries filled. However, as the *missing country values are less than 0.05% of our records*, we decide to ignore them.
+
+Now, we create a table and a graph to analyze the distribution of reviews per country. To keep the bar graph legible, we limited to just the top 10 countries. 
+```{r wine per country, fig.height=6, fig.width=6}
+wineCtry <- wine %>% 
+  group_by(country) %>% 
+  summarise(total = n()) %>% 
+  arrange(desc(total)) %>% 
+  mutate(totpcnt = round(total/ sum(total), digits=7), accum = cumsum(totpcnt))
+
+wineCtry
+
+wineCtry %>% head(10) %>%
+  ggplot( aes(x= factor(country, levels = wineCtry$country[order(desc(wineCtry$totpcnt))]), y = total)) +
+  geom_col() + 
+  geom_text(aes(label = sprintf("%.1f %%", 100*totpcnt), y = total + 1500)) +
+  labs(x="Country", y="Total Reviews", title="Distribution of Wine Reviews by Top 10 Countries")
+```
+
+
+Based on our graph, we can see that by far, the US has the most wine reviews in this dataset, accounting for 42% of all reviews. However, considering the data was scraped from WineEnthusiast, an American-based publication, this is not too surprising. The next most frequent countries in our dataset are France with 17%, Italy with 15%, and Spain with 5%. We also see from the cumulative percentages in our table that the *top 10 countries account for 96% of the data.*
+
+But it's about quality over quantity, so let's see who has the best-rated wines. We see that England has the highest-rated wines on average, and the US doesn't even crack the top 10! 
+```{r best rating, fig.height=6, fig.width=6}
+wineRating = wine %>% 
+ group_by(country) %>%
+ summarise_at(vars(points), funs(points = mean(., na.rm=T))) %>%
+ arrange(desc(points)) %>%
+ head(10)
+
+ggplot(data=wineRating, aes(x=reorder(country,-points), y= points)) + 
+  geom_bar(stat="identity", fill = "navy") + 
+  coord_cartesian(ylim=c(85,92)) + 
+  labs(x="Countries", y="Rating", title="Top 10 Countries by Average Rating")
+```
+
+
+However, being skeptical of these results (because no one goes to England to try wines), we do a quick count of rows of England and see only 63 results, which is not exactly a fair comparison when the US has 50,448 results. 
+```{r English wines}
+wine %>%
+  filter(country=="England") %>%
+  summarize(count = n())
+```
+
+Now let's analyze price. Which countries have the most expensive wines? Here, we see that France has the most expensive wine, with the US in second. (We'll use our original dataset - otherwise the max price would obviously be 200).
+```{r the most expensive wines}
+wine %>%
+ select(country, price) %>%
+ group_by(country) %>%
+ summarise(maxprice = max(price, na.rm = TRUE)) %>%
+ arrange(desc(maxprice)) %>%
+ head(10)
+```
+
+We will now compare averages for the top two countries with the highest-priced wine, France and the US, to see if there's a significant difference in their prices. We can test a hypothesis that even though the max price of wine in France is higher, the average price for wine in France is the same as the average price of wine in the U.S. 
+
+$$
+\left\{ \begin{eqnarray*}
+H_0 &: \mu_{PriceUS} = \mu_{PriceFr} \\
+H_a &: \mu_{PriceUS} \neq \mu_{PriceFr}
+\end{eqnarray*} \right.
+$$
+
+```{r t test wine price}
+t.test(wine$price[wine$country=="US"],
+      wine$price[wine$country=="France"], paired=FALSE)
+```
+Since the p-value (2.2e-16) is less than alpha 0.05, we can conclude with 95% confidence that there is actually a significant difference between the prices of US and French wines. 
+
+
+
+### 5.2 Taster analysis 
+
+Now, we decide to look into our tasters. We wonder if there are many different tasters or maybe some enthusiasts are much more active than others. We run a similar analysis to the previous one made for countries.
+```{r check empty tasters, echo=FALSE}
+# Check data completeness
+cat("Empty spaces: ", sum(wine$taster_name == ""))
+cat("NAs: ", sum(is.na(wine$taster_name)))
+```
+
+As there are no missing values, we will proceed. 
+```{r tasters analysis, fig.height=6, fig.width=6}
+#Group by taster and sort by total reviews. Analyze reviews distribution
+wineTstr <- wine %>% group_by(taster_name) %>% summarise(total=n()) %>% 
+  arrange(desc(total)) %>% 
+  mutate(totpcnt = round(total/ sum(total), 7), accum = cumsum(totpcnt))
+
+wineTstr
+
+#Factor the taster name on desc order for organizing the bars on the next plot
+wineTstr$taster_name <- factor(wineTstr$taster_name, levels = wineTstr$taster_name[order(-wineTstr$total)])
+
+#print a plot with the tasters and number of reviews
+wineTstr %>% ggplot(aes(x= taster_name, y=total)) + geom_col() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  geom_text(aes(label = sprintf("%.f%%", 100*totpcnt), y = total+2000)) +
+  labs(x="Wine Taster Name", y="Total Wine Reviews", title="Total Reviews by Wine Taster")
+```
+
+We find that 21% of our records come from *anonymous tasters* which might seem a bit strange. But moreover, *a single taster accounts for 20% of the reviews* (24,912 wines) which raises a lot of concerns for his health and also for the bias this might introduce on the results of the analysis.
+
+Out of curiosity, we decide to look at the different wine country origins tried by the top 5 tasters.
+```{r taster country spec, fig.height=5, fig.width=5}
+temp <- wineTstr %>% filter(taster_name != "") %>% head(5)
+
+TopTstrCtry <- wine %>% 
+  filter(taster_name %in% temp$taster_name) %>%
+  group_by(taster_name, country) %>%
+  summarise(total = n())
+
+TopTstrCtry %>% 
+  ggplot( aes(x=factor(taster_name, levels = wineTstr$taster_name[order(-wineTstr$total)]), 
+              y=factor(country, levels= wineCtry$country[order(wineCtry$total)]), 
+              size = total)) +
+  geom_point() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(x="Taster", y="Country of Wine Reviewed",title="Countries Reviewed by Top 5 Tasters")
+```
+
+We see that most of them clearly focus on a particular country. Our prolific reviewer, Roger Voss, appears to review mostly French wines and two reviewers, Kerin O'Keefe and Virginie Boone, even focus on wines from a single country.
+
+### 5.3 Ratings and Points Analysis
+Now we want to begin looking into the numerical variables within the dataset. We start with the *ratings* ('point').
+```{r check empty ratings, echo=FALSE}
+# Check data completeness
+cat("Empty spaces: ", sum(wine$points == ""))
+cat("NAs: ", sum(is.na(wine$points)))
+
+summary(wine$points)
+```
+
+There are no NA's, so we will continue exploration.
+```{r ratings analysis, fig.height=6, fig.width=6}
+# Create two graphs testing normality: histogram with normal dstribution and qq plot
+q1=ggplot(wine, aes(x=points, col=I('gray'))) + 
+  geom_histogram(binwidth = 1, aes(y=..density..)) +
+  stat_function(fun=dnorm, args = list(mean = mean(wine$points), sd= sd(wine$points)), col = 'blue')
+
+q2=ggplot(wine, aes(sample=c(scale(points)))) + stat_qq() + geom_abline(intercept = 0, slope = 1)
+
+grid.arrange(q1, q2, nrow=1)
+
+# Create boxplots with mean as points
+q3=wine %>% 
+  filter(country %in% head(wineCtry$country,10)) %>%
+  ggplot(aes(x=country, y=points)) + geom_boxplot() + 
+  stat_summary(fun.y = mean, geom = "point",color=I("blue"))
+q3
+
+
+```
+
+We see that the ratings follow a mostly normal distribution. From the boxplots, we can compare the presence of outliers -- for example, we see that Italy has the highest number of outliers and Austria has no outliers. We can also compare the range of values. For example, we see that the US, Australia, France, and Italy have points that cover the full range of ratings from 80 to 100, but some countries, such as Chile max out at a 95 rating.
+
+Now, we would like to repeat the same exercise with our other numerical variable: *price*
+```{r check empty price, echo=FALSE}
+summary(wine$price)
+
+cat("Empty spaces: ", sum(wine$price==""))
+cat("NAs: ", sum(is.na(wine$price)))
+```
+
+We notice immediately a very large range (min of 4 and max of 3300) and 8388 missing values, so we decide to look into outliers. 
+```{r price outliers}
+df <- wine %>% 
+  filter(!is.na(price))%>% 
+  select(price) %>%  
+  table()
+df1 <- prop.table(df) 
+
+cat("Portion of wines under $200: ", cumsum(df1)['200'])
+```
+
+Since we notice that by looking at wines priced at or under $200 we cover more than 99% of the sample, we decide to clip the outliers for visualizing the distribution. For additional analyses involving price, we create a new dataset called wine2 that removes NA values and filters for prices less than 200. 
+```{r remove price outliers, fig.height=5, fig.width=5, warning=FALSE}
+wine2 = wine %>% filter(!is.na(price), price <=200)
+
+q5 <- wine2 %>%
+  ggplot(aes(x=price, col=I('gray'))) + 
+  geom_histogram(aes(y=..density..)) +
+  stat_function(fun=dnorm, args = list(mean = mean(wine2$price), sd= sd(wine2$price)), col = 'blue')
+
+q6 <- ggplot(wine2, aes(sample=c(scale(price)))) + stat_qq() + geom_abline(intercept = 0, slope = 1)
+
+grid.arrange(q5, q6, nrow = 1)
+
+q7 <- wine %>% 
+  filter(country %in% head(wineCtry$country,10), price <=200) %>%
+  ggplot(aes(x=country, y=price)) + geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  stat_summary(fun.y = mean, geom = "point",color=I("blue"))
+q7
+```
+We can see that, unlike points, the price variable is not normally distributed as values skew heavily to the left. We further confirm this skewness with our boxplots, which show low overall medians and means and several outliers on the higher end. 
+
+Now that we have a better understanding of price and rating individually, we would like to see how *prices and ratings* relate to each other. 
+```{r price rating interaction, fig.height=5, fig.width=5}
+wine2 %>% 
+  ggplot(aes(x=points, y=price)) + 
+  geom_point(position="jitter", alpha=1/10) + 
+  geom_smooth(method="lm", se=F)
+```
+
+Even on our filtered dataset with prices < 200, it is hard to visualize due to the number of data points in our set. We see that there appears to be some sort of linear relation between ratings and points and can deduce from the heaviest concentration of points where most of our ratings and points lie.
+
+However, for a clearer picture it might be helpful to group all our prices and ratings into categories, so we can simplify our comparisons. Based on quantiles, we can split prices into four groups and ratings into four grades.
+```{r price rate categories}
+Q1 = quantile(wine2$price)
+
+wine2 = wine2 %>%
+        mutate(pricerange = ifelse(price >= Q1[4], "Very Expensive", 
+                                    ifelse(price >= Q1[3] & price < Q1[4],"Expensive", 
+                                           ifelse(price >= Q1[2] & price < Q1[3], "Average", "Inexpensive"))))
+
+Q2 = quantile(wine2$points)
+
+wine2 = wine2 %>%
+        mutate(rank = ifelse(points >= Q2[4], "A", 
+                              ifelse(points >= Q2[3] & points < Q2[4],"B", 
+                                     ifelse(points >= Q2[2] & points < Q2[3], "C", "D"))))
+```
+
+We can now graph the frequency of each of our groupings and we see that most wines have a B rating (between 88 and 91) and an Expensive price (25-42 dollars). 
+```{r plot price rate groups, fig.height=5, fig.width=5}
+rank = ggplot(data=wine2, aes(x=rank)) + 
+  geom_bar(fill="Tomato") + 
+  labs(x="Assigned Point Category", y="Wine Count", title="Wine Count by Assigned Rank")
+
+price = ggplot(data=wine2, aes(x=pricerange)) + 
+  geom_bar(fill="Dark Grey") +
+  scale_x_discrete(limits=c("Inexpensive","Average","Expensive","Very Expensive")) +
+  labs(x="Assigned Price Category", y="Wine Count", title="Wine Count by Assigned Price")
+
+grid.arrange(rank, price, nrow=2)
+```
+
+
+To conclude our analysis, we want to find the best years for wines -- that is which years had a maximum rating of 100 and of these wines, which wines had the highest prices. We start by extracting year from the title field and then running an analysis grouping by year. 
+```{r best years, warning=FALSE}
+numextract <- function(string){str_extract(string, "\\-*\\d+\\.*\\d*")} 
+
+wineYear = wine %>%
+  select(price, points) %>%
+  mutate(years = numextract(wine$title)) %>%
+  group_by(years) %>%
+  summarise(maxprice = max(price, na.rm=T), 
+            maxrating = max(points), 
+            avgprice = mean(price, na.rm=T),
+            avgrating = mean(points)) %>%
+  arrange(desc(maxrating), desc(maxprice)) %>%
+  head(5)
+
+wineYear
+```
+
+We see from our results that 2010 and 2014 both had the maximum mark and maximum price. If we look at averages, there are only minor fluctuations in ratings from year to year. Differences in average price are slightly larger, but still similar across years. 
+
+### 5.4 Predicting Ratings
+
+Now we want to explore the predictive world. An interesting predictive task would be to predict the points that a specific wine will receive. From our previous analysis, we think that a few specific variables can help us in doing so:
+
+ * Price, as we saw that price and points for a wine appeared to show some correlation.
+ * Country, as we saw that the distribution of points varied across different countries.
+
+As the dataset is quite large and some of the variables we are interested in have a large number of factors with a small impact on our dataset (e.g., Country has 44 factors but only a handful of these account for a majority of reviews), we decide to create a sample for the ease of running this regression analysis. So we limit our dataset to only wines from the top four countries and top four tasters (based on number of wine reviews).
+```{r create regression sample}
+#remove anonymous wine tasters
+wineTstr2 = wineTstr %>% filter(wineTstr$taster_name!="") 
+
+sample_d = wine %>%
+  filter(wine$country %in% head(wineCtry,4)$country & wine$taster_name %in% head(wineTstr2,4)$taster_name)
+
+dim(sample_d)
+```
+
+Now we have only 41,845 rows in our dataset, which is more manageable. So let us start with a very simple predictive model: Point as a function of Price.
+```{r creating model 1}
+x1 <- sample_d$price
+y1 <- sample_d$points
+model <- y1 ~ x1
+fit <- lm(model)
+summary(fit)
+fit$coeff
+```
+
+This is quite interesting. Earlier, a scatter plot between price and points seemed to show a positive relationship. However, this reduced model shows us that the coefficient of the model is very low, although it is still significant because our p-value is far below 0.05. Earlier, our plot shape seemed to follow a slight quadratic pattern as points start to curve upwards around 90, so let us try to add a quadratic term to improve our model:
+```{r adding quadratic}
+model_2 <- y1 ~ x1 + I(x1^2)
+fit_2 <- lm(model_2)
+summary(fit_2)
+fit_2$coeff
+```
+
+Based on a summary of our new model, we can see that with the quadratic term we managed to improve the model as the R-Squared jumped from 0.15 to 0.25! We run an Anova test to see if adding this qudratic term makes our model significantly better:
+```{r anova with two models}
+anova(fit_2, fit)
+```
+
+We can confirm that our model improved as the p-value (2.2e-16) is far below alpha, so we reject the null hypothesis and conclude that our second model is significantly better. This means we can now explain nearly 1/4 of ratings, simply with a quadratic function of price! 
+
+We now try to add country to our model, running the same tests as before.
+```{r model with country}
+x2 <- sample_d$country
+
+model_3 <- y1 ~ x1 + I(x1^2) + x2
+fit_3 <- lm(model_3)
+summary(fit_3)
+fit_3$coeff
+```
+
+```{r anova for models 2&3}
+anova(fit_3, fit_2)
+```
+
+This new model with country seems to slightly improve our model as our adjusted R-squared is now 0.2804 and it is significantly better when compared to our previous model based on the p-value from running another anova.
+
+Now, let us run a diagnostic of our model. We list here the assumption of Linear Regression:
+ 
+ * __A1__ : linear relation between the IVs and the DV
+ * __A2__ : residuals normally distributed with mean equal to zero
+ * __A3__ : homoscedasticity (equal variance)
+ * __A4__ : residuals are independent
+ * __A5__ : explanatory variables are independent
+```{r test linear relation and homoscedasticity, fig.height=5, fig.width=5}
+qplot(predict(fit_3), rstandard(fit_3), geom="point") + 
+  geom_hline(yintercept=0, colour=I("blue"), alpha=I(0.5)) +
+  coord_cartesian(ylim=c(-5,5)) + 
+  geom_hline(yintercept=2, colour = I("red"), alpha=I(0.5)) + 
+  geom_hline(yintercept=-2, colour = I("red"), alpha=I(0.5))
+```
+
+We begin by testing for a linear relation and homoscedasticity between our residuals. In the resulting scatter plot, we can see that unfortunately that there appears to be a definite pattern in our residuals and the variances differ by ratings, but we continue with our other tests to run a full diagnostic. 
+```{r test normality of residuals, fig.height=5, fig.width=5}
+q1 = qplot(rstandard(fit_3), geom="blank") +
+  geom_histogram(aes(y=..density..), colour=I("gray"), binwidth=1)+
+  stat_function(fun=dnorm, args=list(mean=0, sd=1),
+                colour=I("red"), alpha=I(0.5))
+
+q2 = qplot(sample=rstandard(fit_3)) +
+  geom_abline(slope=1,intercept=0)
+
+grid.arrange(q1,q2,nrow=1)
+```
+
+From the histogram and qqplot, we can see that the residuals are normally distributed, which means our model at least passes this test!
+
+We also want to test for any signs of multicollinearity. To investigate that, we will use the VIF test and worry about collinearity if it is > 5. 
+```{r test multicollnearity}
+vif(fit_3)
+```
+
+This test is passed as well as VIFs are smaller than 5, so we can conclude independent variables are not correlated.
+```{r test autocorrelation}
+durbinWatsonTest(fit_3)
+```
+
+We see again that there is an issue with our residuals. P-value is less than 0.05, which means we cannot say that the residuals are not auto-correlated.
+
+So our model passes 2/5 of the linear regression assumptions, meaning we need to continue to refine it. However, we discovered through this process that this dataset is complicated to do linear regression with, as there are a large number of values, high numbers of outliers, and categorical variables with a high number of factors. For a future iteration of this analysis, we could try to create better samples of the data, run stepwise to automatically find the significant variables, remove influential points, and so on. 
+
+### 5.5 Text Analysis in R
+
+We believe that this dataset is more conducive to textual analysis than linear regression, so we move on to trying to extract conclusions from wine descriptions. Before we begin, we will need to prepare our data for text analysis using functions in the tm package. We will first remove punctuation and numbers and convert to lowercase.
+
+Disclaimer: Ideas and parts of code for this section were taken from DataCamp's course [Text Mining: Bag of Words](https://www.datacamp.com/courses/intro-to-text-mining-bag-of-words)
+```{r prepare text, warning=FALSE}
+#creating vector from descriptions
+review<-wine$description
+
+#interpreting review vector with tm
+review<-VectorSource(review)
+
+#creating VCorpus object
+rev<-VCorpus(review)
+
+#removing punctuation from reviews
+rev<-tm_map(rev, removePunctuation)
+
+#converting to lowercase to make future cleaning easier
+rev<-tm_map(rev, content_transformer(tolower))
+
+#removing numbers
+rev<-tm_map(rev, removeNumbers)
+```
+
+Secondly, we will remove all excess whitespaces and stop words, making use of the tm package's list of stop words.
+```{r clean text}
+#remove stop words (takes around 1 min)
+rev<-tm_map(rev, removeWords, stopwords("en"))
+
+#remove excess white spaces
+rev<-tm_map(rev, stripWhitespace)
+```
+
+Thirdly, we will do word stemming to unify the natural language of our reviewes.
+```{r stem}
+rev<- tm_map(rev, stemDocument)
+```
+
+After that we can figure out what words are used in reviews more often and generate a list of stems that appear at least 1000 times. 
+```{r term freq}
+#creating DTM matrix (takes around 1 min) 
+rev_dtm<-DocumentTermMatrix(rev)
+
+#finding the most popular stems
+rev_freq<-findFreqTerms(rev_dtm, lowfreq=1000)
+rev_freq
+```
+
+After reviewing our generated popular stems, we see some irrelevant words such as "wine" and "it," so we generate a new list of stopwords to perform extra cleaning. 
+```{r new stop list}
+stop_wine <- c("wine", "winery", "it", "winemaking", "winemark", "without", "alcohol", "although", "across", "age", "almost", "along", "also", "amount", "alongsid", "anoth", "approach", "around", "back", "background", "basic", "barrel", "big", "bit", "blend", "bottl", "bouquet", "cellar", "continu", "core", "cut", "develop", "display", "end", "extra",  "drink", "drinking", "doesnt", "element", "enough", "featur", "feel", "fill", "find", "first", "final", "finish", "focus", "follow", "food", "forward", "frame", "front", "get", "give", "given", "glass", "grape", "here", "hint", "highlight", "hold", "just", "keep", "lack", "last", "layer", "length", "lift", "littl", "made", "make", "mark", "medium", "mix", "month", "mouth", "much", "name", "need", "new", "next", "nose", "now", "offer", "one", "open", "overal", "pair", "part", "pack", "play", "price", "produc", "provid", "quick", "quit", "rather", "region",  "remain", "result", "reveal", "right", "round", "run", "select", "seem", "set", "show", "soon", "side", "sip", "small", "slight", "somewhat", "start", "suggest", "suppl", "support", "take", "that", "there", "though", "time", "togeth", "top", "toward", "two", "turn", "use", "variety", "vine", "vineyard", "vintag", "way", "weight", "will", "winemak", "wineri", "year", "yet", "<e2><80><93>", "<c3><a8>dr", "<c3><a9>" ,"aroma", "flavor")
+
+rev2<-tm_map(rev, removeWords, stop_wine)
+```
+
+We use our second matrix to find the top word stems in wine reviews by only choosing ones that appear more than 23,000 times. 
+```{r top stems}
+#creating second DTM
+rev_dtm2<-DocumentTermMatrix(rev2)
+
+#finding top stems in reviews
+top_stems<-findFreqTerms(rev_dtm2, lowfreq=23000)
+top_stems
+```
+
+We see that in wine reviews, it is common to talk about notes, palates, and tannins, and in describing flavors, popular word stems include fruity words such as "fruit"," "cherri," and "black" (probably included because of it's relation to fruit - blackberry, black cherries, etc.).
+
+The amount of text data in reviews are to big to analyze it in R as a whole, so for future analysis we will concentrate on reviews for wines from one country, for example, Spain. We clean our wine descriptions again, but this time filtered on Spanish wines. 
+```{r spanish wine}
+sw<-wine$description[wine$country=="Spain"]
+
+sw<-VectorSource(sw)
+sw<-VCorpus(sw)
+
+clean_corpus <- function(corpus){
+  corpus <- tm_map(corpus, removePunctuation)
+  corpus <- tm_map(corpus, removeNumbers)
+  corpus <- tm_map(corpus, content_transformer(tolower))
+  corpus <- tm_map(corpus, removeWords, stopwords("en"))
+  corpus <- tm_map(corpus, stemDocument)
+  corpus <- tm_map(corpus, removeWords, stop_wine)
+  corpus <-tm_map(corpus, stripWhitespace)
+  return(corpus)
+}
+swc<-clean_corpus(sw)
+
+swctdm<-TermDocumentMatrix(swc)
+```
+
+Now reviews of Spanish wines are ready for more deep analysis. Let's build a plot of the most frequent terms for Spanish wine reviews and a wordcloud for the 1,000 most frequent stems. 
+```{r Spanish, fig.height=6, fig.width=6, warning=FALSE, message=FALSE}
+#creating matrix from TDM
+swcm<-as.matrix(swctdm)
+sf<-rowSums(swcm)
+sf<-sort(sf, decreasing=T)
+
+#creating a data frame
+swf<-data.frame(term=names(sf), num=sf)
+
+#creating a plot of 10 top stems
+ggplot(data=head(swf, 10), aes(x=factor(term, levels = swf$term[order(-swf$num)]), y=num)) + 
+  geom_col(fill="red") + 
+  labs(x="Word Stems", y="Count", title="Top 10 Word Stems in Spanish Wine Reviews") +
+  scale_y_continuous(expand = c(0, 0), breaks=seq(0,3200,400)) +
+
+#creating a wordcloud
+wordcloud(swf$term, swf$num, max.words=50, color="blue")
+```
+
+We can see that the most occurring stem in reviews are connected with fruits and berries ("berri", "plum", "fruit", "cherri", "appl") which are connected to wine's flavor and aroma. The Wordcloud reveals additional frequent words that further describe the flavor and scent, such as "citrus," "herbal," and "vanilla." 
+
+### 5.6 Text Analysis - Python/R
+
+Because some necessary manipulations were not covered in this course, we derived a new dataset from the original dataset using a Python script. The manipulations extracted every word from the descriptions, aggregated and computed the mean and std of points and prices associated with the description, across the descriptions. For example if a review was "This wine was good" and had a rating of 90 and a price of 54, 90 and 54 were assigned to "This" "wine", "was", and "good".
+
+As this manipulation is very computationally expensive, we performed this on a random sampling of 10,000 rows, rather than the entire data set. This analysis can become increasingly significant as it is performed on the whole dataset, but this is first to illustrate our text mining ideas on a sample.  
+
+Let's first load our derived dataset and take a look at its structure.
+```{r load text mining csv}
+text_mining <- read.csv("text_mining4.csv")
+glimpse(text_mining)
+```
+We now have 7 variables in this dataset:
+
+ * __X__ is the unique ID of each word
+ * __Words__ is each word we extracted from individual descriptions
+ * __Point_Mean__ is the aggregate mean point of the word across all descriptions
+ * __Frequency__ is how many times the word appeared across all descriptions
+ * __Point_STD__ is the aggregate SD point of the word across all descriptions
+ * __Price_Mean__ is the aggregate mean price of the word across all descriptions
+ * __Price_STD__ is the aggregate SD price of the word across all descriptions
+
+Now, let's categorize the frequency of words that tasters used in reviewing wines. Using quantiles, we assign Top_Words to the ones that were rated the highest on average, Worst_Words to those that were rated the worst, and MidHigh_Words and MidLow_Words to those in the middle. 
+```{r text quantiles}
+a <- quantile(text_mining$Point_Mean, 0.90)
+b <- quantile(text_mining$Point_Mean, 0.65)
+c <- quantile(text_mining$Point_Mean, 0.30)
+d <- quantile(text_mining$Point_Mean, 0.10)
+
+text_mining = text_mining %>%
+  mutate(score = ifelse(Point_Mean >= a, "Top_Words",
+                               ifelse(Point_Mean >= b & Point_Mean < a, "MidHigh_Words", 
+                                      ifelse(Point_Mean >= c & Point_Mean <b, "MidLow_Words", "Worst_Words"))))
+
+top_words <- text_mining %>% filter(score == "Top_Words")
+head(top_words)
+```
+
+It might be interesting to test the validity of our text mining analysis by looking at synonyms of a single world. By calling an API (Big Huge Thesaurus), we get a list of synonyms, so we can compare ratings of synonyms in our dataset for "beautiful". 
+
+(*Note:* unfortunately Kaggle does not allow external network requests, so we have included our previous code as a reference, but commented it out to run successfully and hard-coded the API results as a data collection.)
+```{r call thesaurus API}
+#word <- "beautiful"
+#url <- "http://words.bighugelabs.com"
+#path <- paste("/api/2/<insert_api_code>/", word, "/json", sep = "")
+#raw.result <- GET(url = url, path = path)
+#head(raw.result$content)
+#this.raw.content <- rawToChar(raw.result$content)
+#this.content <- fromJSON(this.raw.content)
+#synonyms_1 <- this.content$adjective$rel
+#synonyms_2 <- this.content$adjective$sim
+#synonyms <- c(synonyms_1, synonyms_2)
+
+synonyms <- c("attractive", "graceful", "pleasing", "aesthetic", "aesthetical", "beauteous", "better-looking", "bonnie", "bonny", "comely", "dishy", "esthetic", "esthetical", "exquisite", "fair", "fine-looking", "glorious", "good-looking", "gorgeous", "handsome", "lovely", "picturesque", "pleasant", "pretty", "pretty-pretty", "pulchritudinous", "ravishing", "resplendent", "scenic", "sightly", "splendid", "splendiferous", "stunning", "well-favored", "well-favoured")
+```
+
+Let's see how often "beautiful" is used and how good it is compared to synonyms present in other descriptions.
+```{r filtering synonyms beautiful, fig.height=6, fig.width=6}
+potential_words <- subset(text_mining, Words == "beautiful" | Words %in% synonyms)
+
+ggplot(data = potential_words, aes(Words, Frequency, fill=score)) + 
+  geom_bar(stat="identity") +
+  scale_y_continuous(expand = c(0, 0), breaks=seq(0,200,20), limits=c(0,150)) +
+  labs(x="Synonyms", y="Frequency", title="Frequency and Category for Beautiful Synonyms") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+We see in the resulting bar plot that as expected, stronger synoynms for "beautiful"" such as "gorgeous" and "stunning" appear with lower frequencies, but are part of our highest-rated group. In contrast, weaker synonyms, such as "pleasant" and "pretty" are more common and are part of the lowest-rated group. Interestingly, "attractive" is both very common and low-rated. 
+
+So now let's see whether some synonyms of "beautiful" indicate that a wine is significantly better. 
+```{r comparing synonyms beautiful, fig.height=6, fig.width=6}
+potential_words_stats <- potential_words %>% 
+  mutate(upper = Point_Mean + 2*Point_STD,
+         lower = Point_Mean - 2*Point_STD)
+
+#Bar plot with red dots to show a confidence interval of 95%. 
+ggplot(data = potential_words_stats, aes(Words, Point_Mean)) + 
+  geom_bar(stat="identity") + 
+  geom_point(aes(x=Words, y=upper, colour="red")) + 
+  geom_point(aes(x=Words, y=lower, colour="red")) +
+  scale_y_continuous(expand = c(0, 0), breaks=seq(0,200,10), limits=c(0,100)) +
+  labs(x="Synonyms ", y = "Average Rating", title="Average Rating with CI for Beautiful Synonyms")
+```
+
+The word "stunning is indeed associated with the highest mean. However, its confidence interval overlaps with the other confidence intervals, so we cannot conclude that it is significantly better in our dataset. 
+
+
+## 6. CONCLUSION
+Though there are many other interesting questions to explore in the dataset, this is the end of our analysis. To recap, these were our main conclusions: 
+
+1) __Countries__
+* Though there are 44 countries in our dataset, 10 countries account for 96% of the reviews. The US by itself accounts for 42% of reviews. 
+* England has the highest-rated wines on average, but only 63 wines (0.05% of total) in the dataset, so we discard this result.
+* France and the US top our dataset for most expensive wines at 3300 and 2013 a bottle, respectively, but the average wine price of these two countries are not the same. 
+
+2) __Tasters__
+* 21% of wine reviews come from anonymous tasters, but 20% of wine reviews come from a single taster, Roger Voss. We note that Roger's excessive wine tasting may bias the results of our analysis.
+* Wine tasters tend to focus on a specific country. Two of the top tasters only tasted wine coming from one country.
+
+3) __Ratings and Points__
+* Ratings follow a mostly normal distribution, but some countries have more outliers than others. 
+* Price has several missing values, follows a skewed distribution, and has a heavy number of outliers. Even though a previous analysis demonstrated there are wines as expensive as 3300 dollars, we see that 99% of wines are under 200 dollars.
+* Most wines have a rating between 88 and 91 and a price between 25-42 dollars. 
+* 2010 and 2014 boast remarkable wines with a maximum 100 rating and a price of 2500 dollars per bottle.
+
+4) __Predicting Ratings__
+* Linear regression is extremely challenging to run on this particular dataset.
+* We cannot simply explain ratings as a polynomial equation of price and country. 
+
+5) __Descriptions__
+* We found that wine reviews most often talk about "note", "palate", and "tannin" and in describing flavors, often mention fruity words such as "cherry."
+* In reviews of Spanish wines, we notice similar trends, with even more fruity stems such as "blackberry" and "plum", but also other flavor profiles such as "vanilla" and "citrus".
+* The words "stunning" and "gorgeous" appear less frequently in reviews, but are associated with higher-rated wines. In contrast, "pleasant" and "pretty" appear very commonly, but are associated with lower-rated wines. "Attractive" surprisingly is our most common synonym of "beautiful," but is also used for lower-rated wines. 
+* However, there was no significant difference in average rating between synonyms of beautiful. 
+
+Thank you for reading -- please pour yourself a glass of wine for making it this far and we hope you enjoyed.
+
+__Cheers!__ ![](https://images.emojiterra.com/google/android-nougat/128px/1f942.png)
